@@ -1,5 +1,22 @@
 package edu.brown.cs.student.main;
 
+import com.google.common.collect.ImmutableMap;
+import com.google.gson.*;
+import freemarker.template.Configuration;
+import joptsimple.OptionParser;
+import joptsimple.OptionSet;
+import joptsimple.OptionSpec;
+import org.json.JSONException;
+import org.json.JSONObject;
+import spark.ExceptionHandler;
+import spark.ModelAndView;
+import spark.Request;
+import spark.Response;
+import spark.Route;
+import spark.Spark;
+import spark.TemplateViewRoute;
+import spark.template.freemarker.FreeMarkerEngine;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -8,18 +25,9 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.Map;
 import java.util.Set;
-import com.google.common.collect.ImmutableMap;
-import com.google.gson.Gson;
-import freemarker.template.Configuration;
-import joptsimple.OptionParser;
-import joptsimple.OptionSet;
-import joptsimple.OptionSpec;
-import spark.*;
-import spark.template.freemarker.FreeMarkerEngine;
 
 /**
  * The Main class of our project. This is where execution begins.
- *
  */
 public final class Main {
 
@@ -27,12 +35,11 @@ public final class Main {
   private static Autocorrector ac;
   private static final Gson GSON = new Gson();
 
-    /**
-  * The initial method called when execution begins.
-  *
-  * @param args
-  *          An array of command line arguments
-  */
+  /**
+   * The initial method called when execution begins.
+   *
+   * @param args An array of command line arguments
+   */
   public static void main(String[] args) {
     new Main(args).run();
   }
@@ -51,51 +58,51 @@ public final class Main {
         .defaultsTo(DEFAULT_PORT);
     parser.accepts("prefix");
     parser.accepts("whitespace");
-    OptionSpec<Integer> ledSpec = 
-      parser.accepts("led").withRequiredArg().ofType(Integer.class);
+    OptionSpec<Integer> ledSpec =
+        parser.accepts("led").withRequiredArg().ofType(Integer.class);
     OptionSpec<String> dataSpec =
-      parser.accepts("data").withRequiredArg().ofType(String.class);
+        parser.accepts("data").withRequiredArg().ofType(String.class);
 
     OptionSet options = parser.parse(args);
     if (options.has("gui")) {
       runSparkServer((int) options.valueOf("port"));
     }
     if (options.has("data")) {
-        boolean prefix = false;
-        boolean whitespace = false;
-        int led = 0;
+      boolean prefix = false;
+      boolean whitespace = false;
+      int led = 0;
 
-        String files = options.valueOf(dataSpec);
-        if (options.has("prefix")) {
-          prefix = true;
+      String files = options.valueOf(dataSpec);
+      if (options.has("prefix")) {
+        prefix = true;
+      }
+      if (options.has("whitespace")) {
+        whitespace = true;
+      }
+      if (options.has("led")) {
+        led = (int) options.valueOf(ledSpec);
+      }
+
+      // Create autocorrector using files and flags passed in.
+      ac = new Autocorrector(files, prefix, whitespace, led);
+
+      // For each line of input from user, output autocorrect suggestions.
+      try (BufferedReader br = new BufferedReader(
+          new InputStreamReader(System.in))) {
+        String input;
+        while ((input = br.readLine()) != null) {
+          Set<String> suggestions = ac.suggest(input);
+          for (String s : suggestions) {
+            System.out.println(s);
+          }
         }
-        if (options.has("whitespace")) {
-          whitespace = true;
-        }
-        if (options.has("led")) {
-          led = (int) options.valueOf(ledSpec);
-        }
-        
-        // Create autocorrector using files and flags passed in. 
-        ac = new Autocorrector(files, prefix, whitespace, led);
-        
-        // For each line of input from user, output autocorrect suggestions. 
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(System.in))) {
-              String input;
-              while ((input = br.readLine()) != null) {
-                Set<String> suggestions = ac.suggest(input);
-                for (String s : suggestions) {
-                	System.out.println(s);
-                }
-              }
-              br.close();
-            } catch (Exception e) {
-            	  System.out.println("ERROR: Invalid input for REPL");
-            }
+        br.close();
+      } catch (Exception e) {
+        System.out.println("ERROR: Invalid input for REPL");
+      }
     } else {
-        System.out.println("ERROR: usage");
-        System.out.print("./run --data=<list of files> \n[--prefix] [--whitespace] [--led=<led>]\n");
+      System.out.println("ERROR: usage");
+      System.out.print("./run --data=<list of files> \n[--prefix] [--whitespace] [--led=<led>]\n");
     }
   }
 
@@ -121,7 +128,8 @@ public final class Main {
     // Setup Spark Routes
     Spark.get("/autocorrect", new AutocorrectHandler(), freeMarker);
     //TODO: create a call to Spark.post to make a post request to a url which
-      // will handle getting autocorrect results for the input
+    // will handle getting autocorrect results for the input
+    Spark.post("/results", new ResultsHandler());
   }
 
   /**
@@ -140,35 +148,43 @@ public final class Main {
       res.body(stacktrace.toString());
     }
   }
-  
-  /** A handler to produce our autocorrect service site.
-  *  @return ModelAndView to render. 
-  *  (autocorrect.ftl).
-  */
+
+  /**
+   * A handler to produce our autocorrect service site.
+   *
+   * @return ModelAndView to render.
+   * (autocorrect.ftl).
+   */
   private static class AutocorrectHandler implements TemplateViewRoute {
-	  @Override
-	  public ModelAndView handle(Request req, Response res) {
-	    Map<String, Object> variables = ImmutableMap.of("title",
-	        "Autocorrect: Generate suggestions", "message", "Build your Autocorrector here!");
-	    return new ModelAndView(variables, "autocorrect.ftl");
-	  }
+    @Override
+    public ModelAndView handle(Request req, Response res) {
+      Map<String, Object> variables = ImmutableMap.of("title",
+          "Autocorrect: Generate suggestions", "message", "Build your Autocorrector here!");
+      return new ModelAndView(variables, "autocorrect.ftl");
+    }
   }
 
-    /** Handles requests for autocorrect on an input
-     *  @return GSON which contains the result of autocorrect.suggest()
-     */
-    private static class ResultsHandler implements Route {
-        @Override
-        public String handle(Request req, Response res) {
-            //TODO: Get JSONObject from req and use it to get the value of the input you want to
-            // generate suggestions for
+  /**
+   * Handles requests for autocorrect on an input
+   *
+   * @return GSON which contains the result of autocorrect.suggest()
+   */
+  private static class ResultsHandler implements Route {
+    @Override
+    public String handle(Request req, Response res) throws JSONException {
+      //TODO: Get JSONObject from req and use it to get the value of the input you want to
+      // generate suggestions for
+      JSONObject object = new JSONObject(req.body());
+      String value = object.getString("text");
 
-            //TODO: use the global autocorrect instance to get the suggestions
+      //TODO: use the global autocorrect instance to get the suggestions
+      Set<String> suggestions = ac.suggest(value);
+      //TODO: create an immutable map using the suggestions
+      Map<String, Set<String>> variables =
+          ImmutableMap.of("suggestions",  suggestions);
 
-            //TODO: create an immutable map using the suggestions
-
-            //TODO: return a Json of the suggestions (HINT: use the GSON.Json())
-            return null;
-        }
+      //TODO: return a Json of the suggestions (HINT: use the GSON.Json())
+      return GSON.toJson(variables);
     }
+  }
 }
